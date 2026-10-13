@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Forked subagents now reuse the parent's prompt cache from their first request. A fork sends its parent's system prompt, tool declarations, and inherited messages unchanged, signed Anthropic thinking included, and receives its agent prompt, boundary, and tool list in a `<subagent_instructions>` block of its task message. Measured on Claude through an Anthropic-compatible gateway with a 60k-token parent: each fork's first request went from 9.6k cached / 52k written tokens to 60.8k cached / 1.7k written. A fork agent with a tool its parent lacks still misses the cache on models without native mid-conversation tool changes. Fresh children are unchanged.
+
 ## [0.78.0] - 2026-10-12
 
 ### Highlights

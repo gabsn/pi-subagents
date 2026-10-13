@@ -327,7 +327,7 @@ describe("createForkContextResolver", () => {
 		}
 	});
 
-	it("removes signed Anthropic thinking blocks without changing thinking level", () => {
+	it("keeps verbatim signed Anthropic thinking blocks so the fork reuses the parent's prompt cache", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-thinking-"));
 		try {
 			const parentSessionFile = path.join(tempDir, "parent.jsonl");
@@ -347,11 +347,9 @@ describe("createForkContextResolver", () => {
 				}),
 			});
 
+			const original = fs.readFileSync(childSessionFile, "utf-8");
 			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
-			const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
-			assert.deepEqual(entries[2].message.content, [{ type: "text", text: "answer" }]);
-			assert.equal(entries.length, 3);
-			assert.ok(!entries.some((entry: { type: string }) => entry.type === "thinking_level_change"));
+			assert.equal(fs.readFileSync(childSessionFile, "utf-8"), original);
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -378,6 +376,32 @@ describe("createForkContextResolver", () => {
 			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
 			const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
 			assert.deepEqual(entries[2].replacement.content, [{ type: "text", text: "replacement" }]);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("removes signed Anthropic thinking blocks from a fork that will be pruned", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-pruned-thinking-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const childSessionFile = path.join(tempDir, "child.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			writeSessionJsonl(childSessionFile, [
+				{ type: "session", version: 1, id: "child", timestamp: "2026-04-16T00:00:00.000Z", cwd: "/tmp", parentSession: parentSessionFile },
+				{ type: "message", id: "assistant-1", parentId: null, timestamp: "2026-04-16T00:00:02.000Z", message: { role: "assistant", provider: "anthropic", api: "anthropic-messages", model: "anthropic/claude-sonnet-4", content: [{ type: "thinking", thinking: "private chain", thinkingSignature: "signed" }, { type: "text", text: "answer" }] } },
+			]);
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "assistant-1",
+			}, "fork", {
+				openSession: () => ({ createBranchedSession: () => childSessionFile }),
+				pruneSession: async () => {},
+			});
+
+			await resolver.prepareSessionForIndex(0);
+			const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.deepEqual(entries[1].message.content, [{ type: "text", text: "answer" }]);
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}

@@ -3,80 +3,129 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools, type FauxResponseFactory, type Message, type SystemMessage, type Tool } from "@earendil-works/pi-ai";
+import { collapseSystemMessages, fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools, type FauxResponseFactory, type Message, type SystemMessage, type Tool } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildInProcessChildLaunch } from "../../src/runs/shared/child-launch.ts";
 import { topLevelSupervisorTool } from "../../src/intercom/native-supervisor-channel.ts";
 import { createDefaultChildSessionFactory } from "../../src/runs/shared/child-session.ts";
-import registerSubagentPromptRuntime, { keepInheritedToolDeclarations as keepInherited, stripParentOnlySubagentMessages, toolsDeclaredBefore } from "../../src/runs/shared/subagent-prompt-runtime.ts";
+import registerSubagentPromptRuntime, { applyForkSessionAffinity, projectForkRequest, stripParentOnlySubagentMessages, systemMessagesBefore } from "../../src/runs/shared/subagent-prompt-runtime.ts";
 import type { ChildRuntimeConfig } from "../../src/runs/shared/child-runtime-config.ts";
 
 const FORKED_AT = 1_000;
 const tool = (name: string, description = `${name} tool`): Tool => ({ name, description, parameters: { type: "object", properties: {} } as never });
-const system = (timestamp: number, change: { added?: Tool[]; removed?: string[] }): SystemMessage => ({
+const system = (timestamp: number, change: { added?: Tool[]; removed?: string[]; content?: string; sections?: Record<string, string | null> }): SystemMessage => ({
 	role: "system",
-	content: "",
+	content: change.content ?? "",
 	timestamp,
+	...(change.sections ? { sections: change.sections } : {}),
 	...(change.added ? { toolsAdded: change.added } : {}),
 	...(change.removed ? { toolsRemoved: change.removed.map((name) => ({ name })) } : {}),
 } as SystemMessage);
-const user = (timestamp: number): Message => ({ role: "user", content: "task", timestamp });
+const user = (timestamp: number, content = "task"): Message => ({ role: "user", content, timestamp });
 const declared = (messages: Message[]) => getCurrentTools(messages).map((entry) => entry.name);
 const subagentCalls = (messages: Message[]) => messages.flatMap((entry) => entry.role === "assistant" ? entry.content.filter((block) => block.type === "toolCall" && block.name === "subagent").map((block) => (block as { id: string }).id) : []);
+const text = (message: Message | undefined) => typeof message?.content === "string" ? message.content : JSON.stringify(message?.content);
 /** What a request sends when the session holds `messages`, which also stand for the session. */
-const keepInheritedToolDeclarations = (messages: Message[], forkedAt: number, session = messages) => keepInherited(messages, toolsDeclaredBefore(session, forkedAt), forkedAt);
+const project = (messages: Message[], options: { session?: Message[]; boundary?: string } = {}) => projectForkRequest(messages, systemMessagesBefore(options.session ?? messages, FORKED_AT), FORKED_AT, { boundary: options.boundary });
+
+/** A parent whose prompt declares a base text, a role section and tools, then a fork's own prompt and task. */
+const parentHead = system(10, { content: "Parent base prompt.", sections: { preamble: "<preamble>parent</preamble>", tools: "<tools>a b c</tools>" }, added: [tool("a"), tool("b"), tool("c")] });
+const forkSession = (): Message[] => [
+	parentHead,
+	user(20, "parent question"),
+	system(FORKED_AT + 1, { sections: { tools: "<tools>a d</tools>", addendum: "<addendum>CHILD ROLE</addendum>" }, added: [tool("d")], removed: ["b", "c"] }),
+	user(FORKED_AT + 2, "child task"),
+];
 
 describe("a forked child's requests", () => {
-	it("declare every tool its inherited history declares, in that order, then the tools it adds", () => {
-		const messages = [system(10, { added: [tool("a"), tool("b"), tool("c")] }), user(20), system(FORKED_AT + 1, { added: [tool("d")], removed: ["b", "c"] }), user(FORKED_AT + 2)];
+	it("start with the system messages the parent sent, and carry the child's instructions in its task message", () => {
+		const messages = forkSession();
 
-		const sent = keepInheritedToolDeclarations(messages, FORKED_AT);
+		const sent = project(messages, { boundary: "CHILD BOUNDARY" });
 
+		assert.equal(sent[0], parentHead, "the inherited system message is sent as it was");
+		assert.equal(sent[1], messages[1], "the inherited conversation is sent as it was");
+		assert.equal(sent.filter((entry) => entry.role === "system" && entry.timestamp >= FORKED_AT && !entry.toolsAdded).length, 0, "the child's own prompt is not sent as a system message");
+		const task = text(sent.at(-1));
+		assert.match(task, /^<subagent_instructions>\n/);
+		assert.match(task, /<addendum>CHILD ROLE<\/addendum>/);
+		assert.match(task, /CHILD BOUNDARY\n<\/subagent_instructions>\n\nchild task$/);
+		assert.match(task, /Tools you can call: a, d\./);
+		assert.doesNotMatch(task, /<tools>/, "loadout sections are not repeated");
 		assert.deepEqual(declared(messages), ["a", "d"], "Pi's own record restricts the child");
-		assert.deepEqual(declared(sent), ["a", "b", "c", "d"]);
-		assert.equal(sent[0], messages[0], "the inherited system message is sent as it was");
 	});
 
-	it("keep an inherited tool where it was when the child declares it again", () => {
-		const messages = [system(10, { added: [tool("a"), tool("b"), tool("c")] }), system(FORKED_AT, { added: [tool("b", "child b")], removed: ["b", "c"] })];
-
-		const tools = getCurrentTools(keepInheritedToolDeclarations(messages, FORKED_AT));
-
-		assert.deepEqual(tools.map((entry) => entry.name), ["a", "b", "c"]);
-		assert.equal(tools[1]!.description, "child b");
-	});
-
-	it("keep removals made before the fork and removals of tools the child added itself", () => {
-		const parentRemoval = system(30, { removed: ["c"] });
-		const messages = [system(10, { added: [tool("a"), tool("c")] }), parentRemoval, system(FORKED_AT, { added: [tool("x")] }), system(FORKED_AT + 5, { removed: ["x", "a"] })];
-
-		const sent = keepInheritedToolDeclarations(messages, FORKED_AT);
-
-		assert.equal(sent[1], parentRemoval);
-		assert.deepEqual((sent[3] as SystemMessage).toolsRemoved, [{ name: "x" }]);
-		assert.deepEqual(declared(sent), ["a"]);
-	});
-
-	it("are unchanged when nothing before the fork declares a tool", () => {
-		const messages = [system(FORKED_AT, { added: [tool("a"), tool("b")] }), user(FORKED_AT + 1), system(FORKED_AT + 2, { removed: ["b"] })];
-		assert.equal(keepInheritedToolDeclarations(messages, FORKED_AT), messages);
-	});
-
-	it("declare the same list when Pi collapsed the request into one leading system message", () => {
-		const session = [system(10, { added: [tool("a"), tool("b"), tool("c")] }), user(20), system(FORKED_AT + 1, { added: [tool("d")], removed: ["b", "c"] }), user(FORKED_AT + 2)];
-		const collapsed = [system(10, { added: [tool("a"), tool("d")] }), user(20), user(FORKED_AT + 2)];
-
-		const sent = keepInheritedToolDeclarations(collapsed, FORKED_AT, session);
+	it("declare the parent's tools in its order, then the tools only the child has at the fork point", () => {
+		const sent = project(forkSession());
 
 		assert.deepEqual(declared(sent), ["a", "b", "c", "d"]);
+		const additions = sent.filter((entry): entry is SystemMessage => entry.role === "system" && entry !== parentHead);
+		assert.deepEqual(additions.map((entry) => ({ added: entry.toolsAdded?.map((added) => added.name), removed: entry.toolsRemoved, timestamp: entry.timestamp })), [{ added: ["d"], removed: undefined, timestamp: FORKED_AT }]);
+		assert.equal(sent.indexOf(additions[0]!), 2, "after the inherited history, before the task");
+	});
+
+	it("add no system message when the child has no tool of its own", () => {
+		const messages = [parentHead, user(20), system(FORKED_AT + 1, { removed: ["b"] }), user(FORKED_AT + 2)];
+
+		const sent = project(messages);
+
+		assert.deepEqual(sent.filter((entry) => entry.role === "system"), [parentHead]);
+		assert.deepEqual(declared(sent), ["a", "b", "c"]);
+	});
+
+	it("send the same leading message as the parent when Pi collapsed the request", () => {
+		const session = forkSession();
+		const collapsed = collapseSystemMessages({ messages: session }).messages;
+		const parentCollapsed = collapseSystemMessages({ messages: session.slice(0, 2) }).messages;
+
+		const sent = project(collapsed, { session });
+
+		assert.deepEqual(sent[0], parentCollapsed[0], "the parent's own collapsed head");
 		assert.equal(sent[1], collapsed[1], "the conversation is sent as it was");
+		assert.match(text(sent.at(-1)), /<addendum>CHILD ROLE<\/addendum>/);
 	});
 
-	it("are unchanged once a compaction in the child left no inherited message", () => {
-		const session = [system(10, { added: [tool("a"), tool("b"), tool("c")] }), user(20), system(FORKED_AT + 1, { added: [tool("d")], removed: ["b", "c"] }), user(FORKED_AT + 2)];
-		const compacted = [system(FORKED_AT + 10, { added: [tool("a"), tool("d")] }), user(FORKED_AT + 10), user(FORKED_AT + 11)];
+	it("are the same for every fork of the same parent with the same instructions", () => {
+		assert.deepEqual(project(forkSession(), { boundary: "B" }), project(forkSession(), { boundary: "B" }));
+	});
 
-		assert.equal(keepInheritedToolDeclarations(compacted, FORKED_AT, session), compacted);
+	it("keep the instructions as a system section when the child has not written a user message", () => {
+		const messages = [parentHead, user(20), system(FORKED_AT + 1, { sections: { addendum: "<addendum>CHILD ROLE</addendum>" } })];
+
+		const sent = project(messages);
+
+		assert.equal(sent[0], parentHead);
+		assert.match((sent.at(-1) as SystemMessage).sections?.subagent_instructions ?? "", /CHILD ROLE/);
+	});
+
+	it("once a compaction in the child left no inherited message, send the child's own prompt with its boundary as a section", () => {
+		const session = forkSession();
+		const compacted = [system(FORKED_AT + 10, { content: "Child prompt.", added: [tool("a"), tool("d")] }), user(FORKED_AT + 10), user(FORKED_AT + 11)];
+
+		assert.equal(project(compacted, { session }), compacted);
+		const sent = project(compacted, { session, boundary: "CHILD BOUNDARY" });
+		assert.equal(sent[0], compacted[0]);
+		assert.match((sent[1] as SystemMessage).sections?.subagent_boundary ?? "", /CHILD BOUNDARY/);
+		assert.deepEqual(sent.slice(2), compacted.slice(1));
+	});
+});
+
+describe("a forked child's session-affinity header", () => {
+	const anthropic = (compat?: Record<string, unknown>) => ({ api: "anthropic-messages", ...(compat ? { compat } : {}) }) as never;
+
+	it("names the parent session where Pi sends one", () => {
+		const headers: Record<string, string> = {};
+		applyForkSessionAffinity(headers, anthropic({ sendSessionAffinityHeaders: true, sessionAffinityFormat: "openrouter" }), "parent-session");
+		applyForkSessionAffinity(headers, anthropic({ sendSessionAffinityHeaders: true }), "parent-session");
+		assert.deepEqual(headers, { "x-session-id": "parent-session", "x-session-affinity": "parent-session" });
+	});
+
+	it("adds nothing where Pi sends no session-affinity header", () => {
+		const headers: Record<string, string> = {};
+		applyForkSessionAffinity(headers, anthropic(), "parent-session");
+		applyForkSessionAffinity(headers, { api: "openai-responses", compat: { sendSessionAffinityHeaders: true } } as never, "parent-session");
+		applyForkSessionAffinity(headers, anthropic({ sendSessionAffinityHeaders: true }), undefined);
+		assert.deepEqual(headers, {});
 	});
 });
 
@@ -126,7 +175,7 @@ describe("a forked child session", () => {
 		return requests;
 	}
 
-	async function forkOfParent(name: string, parent: { tools?: string[]; hooks?: Array<(pi: ExtensionAPI) => void> } = {}): Promise<{ forkFile: string; parentTools: string[]; parentDeclarations: string }> {
+	async function forkOfParent(name: string, parent: { tools?: string[]; hooks?: Array<(pi: ExtensionAPI) => void> } = {}): Promise<{ forkFile: string; parentTools: string[]; parentDeclarations: string; parentSystem: Message[] }> {
 		const parentFile = path.join(root, `${name}-parent.jsonl`);
 		const [parentRequest] = await run({ sessionFile: parentFile, tools: parent.tools ?? ["read", "bash", "ls"], replies: [fauxAssistantMessage("done")], hooks: parent.hooks });
 		const { SessionManager } = await import("@earendil-works/pi-coding-agent");
@@ -139,7 +188,7 @@ describe("a forked child session", () => {
 		// A real fork comes after its parent's messages; keep them apart by more than a millisecond here.
 		await new Promise((resolve) => setTimeout(resolve, 5));
 		const forkFile = manager.createBranchedSession(manager.getLeafId()!)!;
-		return { forkFile, parentTools: parentRequest!.tools, parentDeclarations: parentRequest!.declarations };
+		return { forkFile, parentTools: parentRequest!.tools, parentDeclarations: parentRequest!.declarations, parentSystem: parentRequest!.messages.filter((entry) => entry.role === "system") };
 	}
 
 	const callBash = (marker: string) => [
@@ -174,8 +223,24 @@ describe("a forked child session", () => {
 			assert.deepEqual(subagentCalls(messages), ["call_subagent_1", "call_subagent_2"], "the parent's subagent calls, the pending one included");
 			assert.ok(messages.some((entry) => entry.role === "toolResult" && entry.toolName === "subagent"), "the parent's subagent result");
 			assert.match(JSON.stringify(messages), /PARENT-NOTICE/);
-			assert.equal(messages.filter((entry) => entry.role === "system").length, 2, "the parent's leading system message and the child's own");
+			assert.equal(messages.filter((entry) => entry.role === "system").length, 1, "only the parent's leading system message");
 		}
+	});
+
+	it("sends its parent's system prompt unchanged and its own role in its task message", async () => {
+		const { forkFile, parentSystem } = await forkOfParent("prompt");
+
+		const requests = await run({
+			sessionFile: forkFile, tools: ["read"], replies: [fauxAssistantMessage("done")], forkCacheKey: "pi-fork:test",
+			launch: { systemPrompt: "FORK-ROLE instructions.", inheritProjectContext: false },
+		});
+
+		const { messages } = requests[0]!;
+		assert.deepEqual(messages.filter((entry) => entry.role === "system"), parentSystem, "the parent's system prompt and tools, byte for byte");
+		assert.doesNotMatch(JSON.stringify(parentSystem), /FORK-ROLE/);
+		const task = messages.at(-1)!;
+		assert.equal(task.role, "user");
+		assert.match(JSON.stringify(task.content), /^\[\{"type":"text","text":"<subagent_instructions>\\n.*FORK-ROLE instructions\..*You are a child subagent.*<\/subagent_instructions>"\}/);
 	});
 
 	const supervised = { runId: "run-s3", orchestratorIntercomTarget: "parent-target", parentSessionId: "parent-session" };

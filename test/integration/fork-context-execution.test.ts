@@ -558,7 +558,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.match(result.content[0]?.text ?? "", /context: "profile" requires agent 'worker' to declare defaultContext/);
 	});
 
-	it("sanitizes inherited signed thinking and keeps child thinking", async () => {
+	it("keeps inherited signed thinking verbatim and keeps child thinking", async () => {
 		const parentSessionFile = path.join(tempDir, "parent.jsonl");
 		const childSessionFile = path.join(tempDir, "fork-with-thinking.jsonl");
 		fs.writeFileSync(parentSessionFile, '{"type":"session","version":1,"id":"parent","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}\n', "utf-8");
@@ -596,7 +596,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		const args = readCallArgs();
 		assert.equal(args[args.indexOf("--model") + 1], "anthropic/claude-sonnet-4-5:high");
 		const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
-		assert.deepEqual(entries[2].message.content, [{ type: "text", text: "answer" }]);
+		assert.deepEqual(entries[2].message.content, [{ type: "thinking", thinking: "private chain", thinkingSignature: "signed" }, { type: "text", text: "answer" }]);
 		assert.equal(entries.length, 3);
 		assert.ok(!entries.some((entry) => entry.type === "thinking_level_change"));
 	});
@@ -647,7 +647,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		const args = readCallArgs();
 		assert.equal(args[args.indexOf("--model") + 1], "anthropic/claude-sonnet-4-5:high");
 		const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
-		assert.deepEqual(entries[1].message.content, [{ type: "text", text: "answer" }]);
+		assert.deepEqual(entries[1].message.content, [{ type: "thinking", thinking: "private chain", thinkingSignature: "signed" }, { type: "text", text: "answer" }]);
 		assert.equal(entries.length, 2);
 		assert.ok(!entries.some((entry) => entry.type === "thinking_level_change"));
 	});
@@ -696,7 +696,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		const args = readCallArgs();
 		assert.equal(args[args.indexOf("--model") + 1], "openai/gpt-5-mini:high");
 		const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
-		assert.deepEqual(entries[1].message.content, [{ type: "text", text: "answer" }]);
+		assert.deepEqual(entries[1].message.content, [{ type: "thinking", thinking: "private chain", thinkingSignature: "signed" }, { type: "text", text: "answer" }]);
 		assert.equal(entries.length, 2);
 		const text = result.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
 		assert.equal(text.includes("fork context forced thinking off"), false);
