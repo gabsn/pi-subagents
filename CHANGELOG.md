@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Replying to a supervisor request that was already answered, expired or withdrawn now lists the requests that are pending instead, so the parent can answer a child's newer request without another `pending` call. Thanks to [@agustinsacco](https://github.com/agustinsacco) for [#2895](https://github.com/nicobailon/pi-subagents/pull/2895). ([#2894](https://github.com/nicobailon/pi-subagents/issues/2894))
+
 ### Fixed
 
 - A forked subagent's first request read almost none of the inherited conversation from the parent's prompt cache, because the fork replaced the parent's system prompt and tools with its own. A fork now sends its parent's system prompt, tool declarations, and inherited messages unchanged, signed Anthropic thinking included, and gets its agent prompt, boundary, and callable tools in a `<subagent_instructions>` block at the start of its task message. So a fork also sees the parent's project context and skills when its agent turns them off. On Claude with a 60k-token parent, each fork's first request went from 9.6k cached and 52k written tokens to 60.8k cached and 1.7k written. A fork agent with a tool its parent lacks still misses the cache on models without native mid-conversation tool changes, and one that redefines a parent tool misses it on every model. Fresh children are unchanged. Thanks to [@gabsn](https://github.com/gabsn) for [#2879](https://github.com/nicobailon/pi-subagents/pull/2879).
+- A read-only child running `grep … 2>/dev/null` could be flagged `needs_attention` for repeated mutating tool failures: the redirect was counted as a file mutation, and successful output containing words like "error" was counted as a failure. Redirects to `/dev/null` no longer count as mutations, and mutating tools count as failed only when their result reports `isError: true`, regardless of output text. A call blocked by a hard `toolBudget` is not counted as a failure either. Thanks to [@Liaokc](https://github.com/Liaokc) for the fix and [@builtroller](https://github.com/builtroller) for the report. ([#2878](https://github.com/nicobailon/pi-subagents/issues/2878), [#2884](https://github.com/nicobailon/pi-subagents/issues/2884))
 - After Pi auto-compacted in the middle of a running turn, the async and Fleet status widgets stayed hidden until the whole run ended, so background subagents showed no status in the TUI or to RPC hosts. They now come back as soon as the compaction finishes. Thanks to [@agustinsacco](https://github.com/agustinsacco) for [#2891](https://github.com/nicobailon/pi-subagents/pull/2891). ([#2890](https://github.com/nicobailon/pi-subagents/issues/2890))
 
 ## [0.78.0] - 2026-10-12
