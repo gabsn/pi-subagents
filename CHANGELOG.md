@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Forked subagents now reuse the parent's prompt cache from their first request. A fork sends its parent's system prompt, tool declarations, and inherited messages unchanged, signed Anthropic thinking included, and receives its agent prompt, boundary, and tool list in a `<subagent_instructions>` block of its task message. Measured on Claude through an Anthropic-compatible gateway with a 60k-token parent: each fork's first request went from 9.6k cached / 52k written tokens to 60.8k cached / 1.7k written. A fork agent with a tool its parent lacks still misses the cache on models without native mid-conversation tool changes. Fresh children are unchanged.
+- A forked subagent's first request read almost none of the inherited conversation from the parent's prompt cache, because the fork replaced the parent's system prompt and tools with its own. A fork now sends its parent's system prompt, tool declarations, and inherited messages unchanged, signed Anthropic thinking included, and gets its agent prompt, boundary, and callable tools in a `<subagent_instructions>` block at the start of its task message. So a fork also sees the parent's project context and skills when its agent turns them off. On Claude with a 60k-token parent, each fork's first request went from 9.6k cached and 52k written tokens to 60.8k cached and 1.7k written. A fork agent with a tool its parent lacks, or its own definition of one of the parent's tools, still misses the cache on models without native mid-conversation tool changes. Fresh children are unchanged. Thanks to [@gabsn](https://github.com/gabsn) for [#2879](https://github.com/nicobailon/pi-subagents/pull/2879).
 
 ## [0.78.0] - 2026-10-12
 

@@ -8,7 +8,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildInProcessChildLaunch } from "../../src/runs/shared/child-launch.ts";
 import { topLevelSupervisorTool } from "../../src/intercom/native-supervisor-channel.ts";
 import { createDefaultChildSessionFactory } from "../../src/runs/shared/child-session.ts";
-import registerSubagentPromptRuntime, { applyForkSessionAffinity, projectForkRequest, stripParentOnlySubagentMessages, systemMessagesBefore } from "../../src/runs/shared/subagent-prompt-runtime.ts";
+import registerSubagentPromptRuntime, { applyForkSessionAffinity, modelBefore, projectForkRequest, stripParentOnlySubagentMessages, systemMessagesBefore } from "../../src/runs/shared/subagent-prompt-runtime.ts";
 import type { ChildRuntimeConfig } from "../../src/runs/shared/child-runtime-config.ts";
 
 const FORKED_AT = 1_000;
@@ -73,6 +73,29 @@ describe("a forked child's requests", () => {
 		assert.deepEqual(declared(sent), ["a", "b", "c"]);
 	});
 
+	it("keep the parent's declaration of a tool the child defines the same way", () => {
+		const messages = [parentHead, user(20), system(FORKED_AT + 1, { added: [tool("b")], removed: ["b"] }), user(FORKED_AT + 2)];
+
+		const sent = project(messages);
+
+		assert.deepEqual(sent.filter((entry) => entry.role === "system"), [parentHead]);
+		assert.equal(getCurrentTools(sent)[1], parentHead.toolsAdded![1]);
+	});
+
+	it("declare the child's own definition of a tool the parent defines differently", () => {
+		const schema = (field: string) => ({ name: "structured_output", description: "Submit the result.", parameters: { type: "object", properties: { [field]: { type: "string" } }, required: [field] } as never });
+		const parent = system(10, { added: [tool("a"), schema("verdict")] });
+		const messages = [parent, user(20), system(FORKED_AT + 1, { added: [schema("summary")], removed: ["structured_output"] }), user(FORKED_AT + 2)];
+
+		const sent = project(messages);
+
+		assert.deepEqual(getCurrentTools(sent).find((entry) => entry.name === "structured_output")?.parameters, schema("summary").parameters, "the schema the child's tool checks");
+		assert.deepEqual(declared(sent), ["a", "structured_output"]);
+		const addition = sent.find((entry): entry is SystemMessage => entry.role === "system" && entry !== parent);
+		assert.deepEqual(addition?.toolsRemoved, [{ name: "structured_output" }], "a changed definition is a removal and an addition, as Pi records it");
+		assert.equal(sent.indexOf(addition!), 2, "at the fork point");
+	});
+
 	it("send the same leading message as the parent when Pi collapsed the request", () => {
 		const session = forkSession();
 		const collapsed = collapseSystemMessages({ messages: session }).messages;
@@ -111,21 +134,30 @@ describe("a forked child's requests", () => {
 });
 
 describe("a forked child's session-affinity header", () => {
-	const anthropic = (compat?: Record<string, unknown>) => ({ api: "anthropic-messages", ...(compat ? { compat } : {}) }) as never;
+	const anthropic = (compat?: Record<string, unknown>, id = "claude") => ({ api: "anthropic-messages", provider: "gateway", id, ...(compat ? { compat } : {}) }) as never;
+	const reply = (timestamp: number, model: string) => ({ role: "assistant", content: [], api: "anthropic-messages", provider: "gateway", model, timestamp }) as unknown as Message;
+	const parentModel = modelBefore([reply(30, "claude"), user(FORKED_AT + 1), reply(FORKED_AT + 2, "other")], FORKED_AT);
 
 	it("names the parent session where Pi sends one", () => {
 		const headers: Record<string, string> = {};
-		applyForkSessionAffinity(headers, anthropic({ sendSessionAffinityHeaders: true, sessionAffinityFormat: "openrouter" }), "parent-session");
-		applyForkSessionAffinity(headers, anthropic({ sendSessionAffinityHeaders: true }), "parent-session");
+		applyForkSessionAffinity(headers, anthropic({ sendSessionAffinityHeaders: true, sessionAffinityFormat: "openrouter" }), "parent-session", parentModel);
+		applyForkSessionAffinity(headers, anthropic({ sendSessionAffinityHeaders: true }), "parent-session", parentModel);
 		assert.deepEqual(headers, { "x-session-id": "parent-session", "x-session-affinity": "parent-session" });
 	});
 
 	it("adds nothing where Pi sends no session-affinity header", () => {
 		const headers: Record<string, string> = {};
-		applyForkSessionAffinity(headers, anthropic(), "parent-session");
-		applyForkSessionAffinity(headers, { api: "openai-responses", compat: { sendSessionAffinityHeaders: true } } as never, "parent-session");
-		applyForkSessionAffinity(headers, anthropic({ sendSessionAffinityHeaders: true }), undefined);
+		applyForkSessionAffinity(headers, anthropic(), "parent-session", parentModel);
+		applyForkSessionAffinity(headers, { api: "openai-responses", compat: { sendSessionAffinityHeaders: true } } as never, "parent-session", parentModel);
+		applyForkSessionAffinity(headers, anthropic({ sendSessionAffinityHeaders: true }), undefined, parentModel);
 		assert.deepEqual(headers, {});
+	});
+
+	it("keeps the child's own header when the child runs on another model than the one that wrote its inherited history", () => {
+		const headers: Record<string, string> = { "x-session-affinity": "child-session" };
+		applyForkSessionAffinity(headers, anthropic({ sendSessionAffinityHeaders: true }, "other"), "parent-session", parentModel);
+		applyForkSessionAffinity(headers, anthropic({ sendSessionAffinityHeaders: true }), "parent-session", undefined);
+		assert.deepEqual(headers, { "x-session-affinity": "child-session" });
 	});
 });
 
