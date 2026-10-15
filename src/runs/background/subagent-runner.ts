@@ -84,7 +84,7 @@ import { normalizeExtensionBindings } from "../shared/extension-bindings.ts";
 import type { ChildSessionFactory, DefaultChildSessionFactoryOptions } from "../shared/child-session.ts";
 import { runChildSession, type ChildEvent, type RunChildSessionInput, type RunChildSessionResult, type SteerDelivery, type StepSteerHandler } from "./run-child-session.ts";
 import { loadRunnerChildSessionFactory } from "./runner-child-sessions.ts";
-import { SUBAGENT_CHILD_ENV } from "../shared/child-runtime-config.ts";
+import { SUBAGENT_CHILD_ENV, SUBAGENT_RUNNER_PID_ENV } from "../shared/child-runtime-config.ts";
 import { deriveChildSessionName } from "../../shared/child-session-name.ts";
 import { alignForkedSessionCwd } from "../../shared/fork-session-cwd.ts";
 import { outputEntryFromAsyncResult, resolveOutputReferences } from "../shared/chain-outputs.ts";
@@ -166,8 +166,10 @@ const INTERCOM_DETACH_RECEIPT = "Detached for intercom coordination before task 
 
 // This process hosts child sessions. An ambient copy of pi-subagents loaded
 // into one of them must register nothing; the variable marks the process as a
-// child host.
+// child host. Processes spawned from a child inherit both variables, so only
+// the runner pid, matched against process.pid, identifies the runner itself.
 process.env[SUBAGENT_CHILD_ENV] = "1";
+process.env[SUBAGENT_RUNNER_PID_ENV] = String(process.pid);
 
 export interface SubagentRunConfig {
 	id: string;

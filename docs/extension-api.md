@@ -432,6 +432,10 @@ Children do not gain provider tools or extensions automatically. Add `bg_wait` t
 
 Local foreground children never load the parent's ambient extensions: they share the parent's process, and loading them would start a second copy of every ambient extension, including this one, inside it. They do inherit the providers the parent's extensions registered, so a provider extension's models resolve in a local foreground child. Pane-native remote foreground children instead use the remote machine's provider discovery and configuration. Agents that need MCP tools (`mcpDirectTools`, or MCP tools from an ambient adapter such as pi-mcp-adapter) must run as background children (`async: true`), which load the ambient extensions inside the detached runner process unless the agent sets `extensions` or the capability ceiling denies extensions.
 
+The runner hosts many child sessions in one process and keeps working after each one ends: a background child's extensions see `session_shutdown` with reason `"quit"` in print mode, but the process does not exit with it. An extension that acts on process exit at that point (for example by force-exiting a headless run) should first check `process.env.PI_SUBAGENT_RUNNER_PID === String(process.pid)`, which is true only inside the runner. `PI_SUBAGENT_CHILD=1` cannot make that distinction: processes spawned from a child, such as a headless `pi` started by its bash tool, inherit both variables but have their own pid.
+
+A local foreground child ends the same way, but it runs inside the parent Pi process, which is not a runner and sets no marker. An extension configured into a foreground child (through the agent's `extensions` or `subagentOnlyExtensions`) must not act on process exit at `session_shutdown`.
+
 ## External job provider bridge
 
 Extensions that own long-running advisor jobs can register a process-local provider for `runner.type: external-job` agents:
